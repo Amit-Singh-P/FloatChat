@@ -1,0 +1,911 @@
+# Stage progress
+
+## Stage 4 - natural-language assistant, RAG and benchmark built (ADR-0069..0074), 2026-10-12
+
+Follow-up 2026-10-13 (ADR-0075, branch `codex/stage4-model-fallback`): after the owner's review
+of the live chat, the model decides plan, clarify, reply or unsupported for every message, and
+the chat page became a viewport-height app with a pinned composer. The advisor reviewed the
+approach before the change and the result after it (greeting fallback for chained phrases, no
+time promise in the rate-limit message). Live model replies are unverified: the owner's
+free-tier Gemini key allows 20 requests per day per model and all three routes were spent.
+
+Owner instruction 2026-10-12: `main` (`dff185a`) holds the accepted Stage 3 and the
+dashboard-latency work; build Stage 4 on a new branch and decide open questions without further
+approval. Branch `codex/stage-4` from `main`; one pull request into `main`. The advisor reviewed
+the approach before the plan was written (ADR-0039 convention) and its eleven amendments are
+folded into [docs/stage4-plan.md](docs/stage4-plan.md) section 0. No Gemini or other model key
+existed on the host, so every part is built and tested key-independent and the reported numbers
+come from the opt-in offline provider (labelled as not an LLM result).
+
+- [x] Plan corrections recorded in the plan's section 0: no key on this host, offline opt-in,
+  offline numbers labelled, gold plans validated with recorded gold kinds, `httpx` runtime
+  dependency, client ownership header, one 768-dimension vector column, wire format from the
+  reference, pricing as configuration with a token backstop, injection items, harness without a
+  database, one structured planning call.
+- [x] ADR-0069 (scope, branch, provider default, pins), ADR-0070 (adapter, resilience, ledger,
+  caps), ADR-0071 (corpus, `semantic_document`, embeddings, retrievers), ADR-0072 (chat flow,
+  store, ownership), ADR-0073 (injection and hallucination controls), ADR-0074 (benchmark,
+  harness, integrity).
+- [x] W1 migration `0018_semantic_chat` (`semantic_document` with `vector(768)`,
+  `chat_conversation`, `chat_message`, `llm_call`; query login reads documents, application login
+  writes); `PostgresStore`, `MemoryStore`, `PostgresLedger`, `MemoryLedger`; the bootstrap names
+  the Stage 4 application tables.
+- [x] W2 `floatchat_core/llm`: Gemini REST `v1beta` adapter (structured JSON, SSE streaming,
+  batch embeddings), OpenAI-compatible adapter, opt-in `offline` provider (`offline-rules-v1`,
+  `hash-embed-v1`), `ResilientProvider` (timeouts, bounded retries, circuit breaker, daily USD
+  and token caps from the durable ledger), versioned price table, `LlmSettings`.
+- [x] W3 `floatchat_core/rag`: corpus of 72 documents generated from the catalogue (parameters,
+  QC flags and policies, aggregation units, operations, presentations, limits, 7 regions with 54
+  aliases, help, 34 curated examples), `MemoryRetriever` and `PgVectorRetriever` with one
+  ranking, `scripts/semantic_seed.py` (content-hash re-embedding, retirement), `scripts/dev.py
+  seed-corpus` and the corpus seeded at the end of `make dev`.
+- [x] W4 `floatchat_core/chat`: rule classification, one structured planning call with a flat
+  schema, validation by `validate_plan` and the region fixture (a failing model plan becomes a
+  clarification), execution through `QueryService.query`, bounded summary, template narrative,
+  model narrative kept only when its numbers are grounded, audit record, event generator.
+- [x] W5 `POST /v1/chat/messages` (JSON or `text/event-stream`), `GET /v1/chat/conversations`,
+  `GET /v1/chat/conversations/{id}`; `X-FloatChat-Client` scoping; `llm_unavailable`,
+  `llm_budget_exhausted`, `chat_limit`, `client_required` registered; `API_VERSION` 0.3.0;
+  `openapi.json` and `schema.d.ts` regenerated.
+- [x] W6 web `/chat`: conversations, composer, streamed status and tokens, the interpretation
+  panel (period, area, depth, variables, QC, operation, presentation, transformation, retrieved
+  documents, provider and model, prompt version, plan JSON and hash), results through the Stage 3
+  chart, table and provenance components, clarification chips, the unavailable state; the stub
+  and "Soon" badge removed.
+- [x] W7 `eval/golden/dev.json` (61) and `test.json` (121): 182 items, 152 plans, 14
+  clarifications, 16 unsupported, every gold plan validated, every item `needs human review`.
+- [x] W8 `eval/nl/harness.py`, `make eval-nl`, `make eval`; held-out report
+  [reports/eval_nl_2026-10-12.md](reports/eval_nl_2026-10-12.md) (offline provider: plan exact
+  match 72.0% schema-only, 83.0% with retrieval; result accuracy 89.2% over 93 executed plans;
+  labelled not an LLM result). Tuning used the development split only (dev exact match 63% ->
+  100% with retrieval after tuning).
+- [x] W9 tests: 71 Stage 4 unit and contract cases (adapters over a fake transport, corpus,
+  retriever, pipeline, injection, grounding, API, SSE, PRD section 22 degradation, golden,
+  harness); `tests/stage2/test_semantic_store.py` on the disposable PostGIS server; 8 Vitest
+  chat cases; Playwright `chat.spec.ts`; `scripts/integration.py` seeds the corpus and probes the
+  chat with the offline provider. Full offline Python suite green (1,948 passed; the `test_refetch`
+  HTTPS deadline cases are intermittent on this host, on `main` as well).
+- [x] Local acceptance on the dev stack (`LLM_PROVIDER=offline`): chat answers over JSON and
+  SSE, the held-out harness executed through the API, Playwright scenario and screenshot under
+  `reports/stage4-acceptance-2026-10-12/`.
+- [x] W10 [docs/stage4-gate.md](docs/stage4-gate.md) with the ten failure types; README;
+  `.env.example`; `eval/README.md`.
+- [x] Advisor review of the built stage recorded 2026-10-12 (ADR-0039 convention): push gate
+  passed with six amendments applied before pushing: secrets scan of the tree and the branch
+  history (a key-shaped test literal was replaced and the two local commits rewritten; history
+  scan clean), an empty `GEMINI_API_KEY` is no key (configured false, corpus seed and `make dev`
+  skip instead of failing, tests with the empty value), `httpx` and the Gemini adapter import
+  verified inside the API image, the `test_refetch` failures reproduced on `main` in a clean
+  worktree (environmental), the chat page test pastes its question under a 30 s budget, the
+  gate's CI line marked pending. The CI integration script passed locally
+  (`reports/stage0-integration.json`, `stage4-chat-offline-plan-and-execute`).
+- [x] CI green on pull request #13 at `e6e00c4` (all seven jobs, including the Stage 1 component
+  job once the semantic store test moved to its loopback step):
+  https://github.com/aayushsaxena17/FloatChat/actions/runs/38294847877.
+- [ ] Owner: Gemini key, live adapter verification, gold-plan review, the real RQ1 number.
+
+## Dashboard latency (ADR-0066..0068), 2026-10-11
+
+Owner request 2026-10-11: one local checkout synced with `main`, and a faster dashboard through
+concurrency and proper DuckDB use. The advisor reviewed the plan before work started (ADR-0039
+convention) and its amendments were applied: archive before deleting, the Windows Docker project
+left alone, the DuckDB security lock proven before choosing the native reader, ADRs recorded.
+
+- [x] Single checkout `~/FloatChat` on `main` (`7efeb2d`); the Stage 0 clones and the perf worktree
+  deleted after archiving their unique files and a bundle of every local branch under
+  `~/FloatChat-archive`; 32 old Docker test and acceptance projects removed (the dev stack, the
+  accepted session `302412131a7c99fb` and the Windows project kept); hard-coded checkout paths
+  fixed in pull request #10.
+- [x] ADR-0066: shared locked DuckDB engine with native `read_parquet`, all CPUs, a concurrency
+  bound; `POST /v1/query` off the event loop.
+- [x] ADR-0067: in-process result and coverage memo keyed by the dataset version.
+- [x] ADR-0068: IndexedDB persistence of finished answers with a dataset-version guard; Plotly and
+  MapLibre loaded on demand (entry 139 kB gzipped).
+- [x] Evidence: [reports/dashboard_latency_2026-10-11.md](reports/dashboard_latency_2026-10-11.md)
+  (whole-quarter median 2.7 s before, 0.63-0.92 s after, repeats 17-21 ms; health during
+  aggregates about 10 ms instead of 1.3 s); route agreement re-proven
+  ([reports/stage2-route-check_2026-10-11.md](reports/stage2-route-check_2026-10-11.md), 10 of 10).
+- [x] CI on the pull request (#11 merged into `main` at `dff185a`).
+
+## Stage 3 - web dashboard complete, CI green on PR #8 (ADR-0061..0065), 2026-10-10
+
+Owner instruction 2026-10-09: Stage 2 (PR #6, merged) and the Stage 2 fixes (PR #7, open) are
+accepted; build Stage 3 on them and decide open questions without further approval. Branch
+`codex/stage-3` from `codex/stage-2-fixes` at `5cf262e`; the pull request targets `main` and is
+rebased after PR #7 merges. The plan [docs/stage3-plan.md](docs/stage3-plan.md) was written
+against the merged code; the advisor reviewed the approach before the plan was written
+(ADR-0039 convention) and the written plan is recorded below once reviewed.
+
+- [x] Plan corrections recorded in the plan's section 0: branch base, seeded e2e data in CI,
+  typed response models, provenance on reads, view timestamps for the coverage panel,
+  `APPLICATION_COMMIT` wiring, library majors, offline basemap, one unit per chart, the map
+  point cap, the kept Stage 0 browser check, cold Vite in the integration stack.
+- [x] Advisor review of the written plan recorded 2026-10-09 (ADR-0039 convention): agreed with the
+  plan and ADR-0061..0065 with four amendments folded in before implementation: the WebGL2
+  probe is stated for this host only; MapLibre text layers need a glyph server, so labels are DOM
+  overlays (ADR-0062); the objects seeding step verifies the regenerated part bytes against the
+  catalogue before uploading; the environment model keeps the tier intervals and timestamps
+  optional for a database without a completed run.
+- [x] ADR-0061 (scope, branch, routes, pins), ADR-0062 (offline basemap, clustering, point cap),
+  ADR-0063 (shared seed, seeded integration project, local acceptance), ADR-0064 (typed
+  responses, provenance on reads, migration 0017, application commit), ADR-0065 (chart rules).
+- [x] W1 API additions (ADR-0064): typed response models with `extra="allow"` and
+  `response_model_exclude_unset` (payloads unchanged), `provenance.build_read` on the four read
+  endpoints, migration `0017_query_env_times` (the first name exceeded alembic's 32-character
+  version column and was renamed before any database took it), `APPLICATION_COMMIT` from Git
+  through Compose; `apps/api/openapi.json` and `apps/web/src/api/schema.d.ts` regenerated; the
+  contract-test doubles typed; `tests/stage3/test_provenance_read.py`.
+- [x] W2 `scripts/science_seed.py` (ADR-0063): the Stage 2 seed moved out of the conftest,
+  `STAGE3_PROFILES` (four January 2025 Arabian Sea profiles, polygon membership checked on
+  PostGIS), `database` and `objects` entry points with catalogue verification; shipped in the API
+  image; `scripts/integration.py` seeds the disposable project, restarts the API (warm-up over the
+  seeded parts) and asserts the scenario lists five profiles; `tests/stage3/test_science_seed.py`.
+  The Stage 2 integration suite passes unchanged on the shared seed (12 cases, 2026-10-09).
+- [x] W3 shell and state: `react-router` 7.18.4, `@tanstack/react-query` 5.104.1; `/` redirects
+  to `/dashboard`; stubs name their stage; filters parsed from and written to the URL
+  (`explorer/filters.ts`, 100% of the model under Vitest); hooks with bounded page following.
+- [x] W4 map (ADR-0062): `maplibre-gl` 6.13.0 over the bundled Natural Earth land layer
+  (`scripts/build_basemap.py`, 193 KB, 314 polygons, source SHA-256 recorded), built-in
+  clustering with DOM count markers (no glyph server), trajectory, region bounding box, hover
+  popups, a profile list as the keyboard path, 5,000-point cap label. MapLibre 6 resolves its
+  worker relative to its module URL, which Vite's pre-bundle breaks; the worker is imported
+  through Vite (`?url`) and set with `setWorkerUrl`.
+- [x] W5 charts (ADR-0065): `plotly.js-cartesian-dist-min` 4.1.2 through a 20-line wrapper;
+  `charts/spec.ts` translates the contract (allow-listed keys only) into one figure per unit
+  group with units on every axis, the validated reference palette by series identity, folding to
+  one colour past three profiles, a table view for every figure; profile charts from
+  `/v1/profiles/{id}` (temperature and salinity against pressure downwards, T-S diagram, QC and
+  data-mode summary).
+- [x] W6 panels: coverage (range, region, manifest counts, slot states and missing tiles, source
+  retrieval window, ingestion timestamp, reference time, tiers) and provenance on every result.
+- [x] W7 accessibility and attribution: skip link, landmarks, labelled controls with errors beside
+  them, live regions, visible focus tokens, UTC and longitude conventions stated, non-colour
+  status badges, footer citing Argo, Argovis, Marine Regions and Natural Earth.
+- [x] W8 tests: 47 Vitest cases (filters, chart translation, profile figures, units, points,
+  coverage panel, provenance panel, profile charts, dashboard with a fetch stub over recorded
+  fixtures, app shell and stubs) with MapLibre and Plotly mocked under jsdom; recorded fixtures
+  from the dev API (`scripts/capture_web_fixtures.py`); Playwright `e2e/dashboard.spec.ts`
+  (the build prompt's scenario through the controls, URL assertions, the map's live count, list
+  selection, profile chart with axis titles and table rows, provenance) and the adapted Stage 0
+  shell check; both pass against the dev dataset on this host (2026-10-09).
+- [x] W9 `scripts/stage3_acceptance.py` on the imported dataset:
+  [reports/stage3-acceptance-2026-10-10.json](reports/stage3-acceptance-2026-10-10.json) passed
+  (132 profiles in the scenario, 9 of 10 slots covered and 1 verified empty, screenshots under
+  `reports/stage3-acceptance-2026-10-10/`).
+- [x] `scripts/integration.py` on this host (2026-10-10): complete, project
+  `floatchat-stage0-test-ac9dd329caa2`, empty-volume start-up 27.4 s, 5 seeded profiles in the
+  scenario, the Stage 0 probes and outage checks, both Playwright specs green on the
+  containerised Vite server (7.9 s, 3.8 s) ([report](reports/stage0-integration.json)).
+- [x] Full offline suite on `56900f4`: `pytest -m 'not integration'` 1,870 passed, 1 skipped;
+  `pnpm test` 47 passed; `make lint` and `make typecheck` clean; `pnpm build` green.
+- [x] Gate report [docs/stage3-gate.md](docs/stage3-gate.md); branch pushed as
+  `origin/codex/stage-3` through the owner's stored GitHub credential.
+- [x] Pull request [#8](https://github.com/aayushsaxena17/FloatChat/pull/8) into `main` opened
+  2026-10-10 (base `codex/stage-2-fixes`; rebased after PR #7 merges).
+- [x] Advisor review of the implemented Stage 3 recorded 2026-10-10 (ADR-0039 convention): agreed
+  with the implementation at `5b5bd54` with two open items, both closed in the next commit: the
+  default landing view (Indian Ocean, the whole quarter) asked for a per-profile histogram over
+  5,814 profiles and received `result_too_large` (the contract bounds a series to 5,000 points),
+  so the dashboard now withholds that request above the published `chart_points_per_series`
+  bound and says how to narrow the filters; and the Playwright and secrets checks were run on the
+  final head (`pnpm exec playwright test` 2 passed; `make secrets-current` reports only the
+  owner's git-ignored `.env.txt` of ADR-0039, which CI never sees).
+- [x] CI green: run 38007878218 on `5b5bd54` and run 38008497585 on the final head `815751a`,
+  all seven jobs including the seeded `integration` e2e and `stage1-offline-components` with
+  `tests/stage3`. Later commits on the branch: the histogram bound, the map overlay position,
+  category axes for month and day keys (48 Vitest cases). Stage 3 gate closed 2026-10-10;
+  merge of PR #8 is the owner's decision (rebase onto `main` after PR #7).
+- [x] 2026-10-10: a re-run of the `integration` job failed on a real race in the URL filter hook
+  (fast successive control changes dropped `end`); fixed in `explorer/useFilters.ts` with a
+  regression test (50 Vitest cases); CI re-checked on the fix commit.
+
+## Stage 2 - post-gate fixes on `codex/stage-2-fixes` (ADR-0058 amendment), 2026-10-09
+
+Stage 2 merged into `main` as `cf0e58b` (PR #6). The two risks named in the gate are addressed on
+`codex/stage-2-fixes` from `main`; the third (the preserved session's crash recovery) needed no fix.
+
+- [x] Cold-path deadline: the API warms the part cache in a background thread at start-up (every
+  active part, newest months first, bounded by the cache size and `warm_cache_seconds`; readiness
+  never waits) and retries a DuckDB execution once when it times out right after a cold fill.
+  Measured on the dev stack: a cache-cold restart filled 206 parts (301,781,882 bytes) in 31.6 s
+  and the first whole-quarter aggregate afterwards ran in 2.0 s with nothing fetched.
+- [x] Cross-route agreement on the real data: `scripts/stage2_route_check.py` runs the ten DuckDB
+  plans of the latency matrix on both routes inside the API container and writes
+  [reports/stage2-route-check_2026-10-09.md](reports/stage2-route-check_2026-10-09.md): PASS, 10 of 10
+  plans agree on the 4.14 M-level copy, maximum relative difference 5.8e-14 (summation order);
+  the same plans take 9.6-30.0 s on the PostgreSQL route against 1.7-7.6 s on DuckDB.
+- [x] Tests: 521 offline Stage 2 tests (7 new for the fill statistics, warm-up, retry, start-up
+  hook and the check's comparison) and 12 integration cases (warm-up on the seeded server).
+- [x] Pull request [#7](https://github.com/aayushsaxena17/FloatChat/pull/7) opened 2026-10-09. CI's
+  four non-Docker jobs pass; the three image-building jobs hit Docker Hub's anonymous pull rate
+  limit (HTTP 429) on both pushed heads and are re-run as the quota window moves. Local evidence
+  for the blocked `integration` job: `scripts/integration.py` passed on this host
+  ([report](reports/stage0-integration.json), project `floatchat-stage0-test-556f84c33457`,
+  empty-volume start-up 55.6 s, Stage 2 catalogue check on the empty database passed).
+- [ ] CI green on the pull-request head (blocked only by the registry rate limit).
+- [ ] Owner confirmation of ADR-0057, ADR-0059 and ADR-0060 (not recorded by the merge of PR #6).
+
+## Stage 2 - plan reviewed and authorized (ADR-0056..0060), 2026-10-09
+
+`codex/stage-1` merged into `main` by PR #5 (squash `91f7dd5`, tree equal to `a4d6a01`); the remote
+Stage 1 branch is deleted. Stage 2 works on `codex/stage-2` from `main`. The draft plan was reviewed
+against the merged code and rewritten: [docs/stage2-plan.md](docs/stage2-plan.md). The advisor
+reviewed the findings before the rewrite and agreed with the rewritten plan and ADR-0056..0060 on
+2026-10-09 (ADR-0039 convention); implementation may start.
+
+- [x] Plan corrections recorded in the plan's section 0: migration `0016` (not 0010), parts plus
+  membership manifests, the `argovis`-only population, `qc-policy-v1`, the environment reference
+  time, the development dataset copy, the read-only role and views, the geography index,
+  `/v1/floats` scope, partial labelling without jobs, bounded in-process DuckDB, named-region
+  source and definitions, unchanged dev Compose service set.
+- [x] ADR-0056 (scope, branch, population, router reference time), ADR-0057 (`qc-policy-v1`, owner
+  to confirm), ADR-0058 (`floatchat_query`, views, DuckDB over a verified cache), ADR-0059 (dataset
+  copy from session `302412131a7c99fb`, owner to confirm), ADR-0060 (IHO Sea Areas v3 regions).
+- [x] W2 migration `0016_query_access`: `floatchat_query` login, `app.query_*` views,
+  `app.named_region` (7 regions from IHO Sea Areas v3 through `scripts/build_named_regions.py`,
+  0.05 degree simplification, parts and holes under 50 km² removed, 337 KB fixture), indexes
+  `profile_float_time` and `profile_position_geog`.
+- [x] W3 `floatchat_core.query`: plan model with registered rejections, `qc-policy-v1`, geography and
+  tiles, SQLAlchemy Core compiler, catalogue coverage on the query login, SHA-256-verified part
+  cache, bounded DuckDB compiler with the manifest semi-join, router, sanitiser, chart contract,
+  provenance. `docs/stage2-query-engine.md` shows the compiled statements.
+- [x] W4 API routes with correlation IDs, closed error registry, request bound; W1 bootstrap, dev
+  configuration (additive keys), Compose cache volume, `scripts/stage2_dataset.py` (streamed binary
+  COPY per month, verified object mirror).
+- [x] Integration suite `tests/stage2/test_integration.py` (11 cases on a disposable PostGIS server:
+  migration, read-only login, regions, coverage labelling without job creation, pagination,
+  geodesic nearest with the geography index, PostgreSQL and DuckDB agreement, manifest exclusion,
+  float and profile reads, charts and provenance) passes locally.
+- [x] W5 `apps/api/openapi.json` (checked by `scripts/export_openapi.py --check`), the generated
+  `apps/web/src/api/schema.d.ts` and the typed `client.ts` with Vitest coverage; CI regenerates and
+  diffs the client and runs `tests/stage2` in the offline components job.
+- [x] W6 unit suites (513 offline tests: plan, policy, compilers, sanitiser and charts, cache and
+  DuckDB runner, regions, errors, API contract, OpenAPI artefact, latency script) plus the
+  11-case integration suite; the contract tests found and fixed six defects (raw body handling,
+  cursor id validation, regex anchors, cache eviction, edge tiles, UTC rendering).
+- [x] W1 dataset: session `302412131a7c99fb` copied into the dev project by streamed binary COPY
+  (5,814 profiles, 4,144,346 levels, 206 parts, 301,781,882 bytes; the pg_dump path crashed the
+  1 GiB session server and was replaced); [report](reports/stage2-dataset-302412131a7c99fb.json).
+- [x] W7 latency: [run 2](reports/query_latency_2026-10-09.md) (canonical) and
+  [run 1](reports/query_latency_2026-10-09-run1.md): PostgreSQL route worst warm p95 528.6 ms,
+  DuckDB route (whole-envelope quarter, 4.14 M levels) worst warm p95 1,859.7 ms, metadata
+  32.0 ms; every PRD §3.1 objective passes in run 2; run 1's D04 cache-cold call timed out under
+  page-cache pressure after the 288 MiB object fill.
+- [x] W8 gate report [docs/stage2-gate.md](docs/stage2-gate.md); `make lint`, `make typecheck`,
+  `make test` (1,844 Python offline, 12 web) and the 11-case integration suite green locally.
+- [x] CI on `1797154`: the six merge-required jobs (`python`, `web`, `docker`, `integration`,
+  `secrets-current`, `secrets-history`) passed; the non-required offline components job failed one
+  Stage 1 case (`test_B07_repeat_bootstrap_cannot_regrant_scientific_writes`: the bootstrap
+  demanded `DB_QUERY_PASSWORD`), fixed in the next commit (the query role stays `NOLOGIN` without a
+  configured password); the Stage 2 integration step of that job runs on the fixed head.
+- [x] Advisor review of the implemented Stage 2 recorded 2026-10-09 (ADR-0039 convention): agreed
+  with the implementation at `1797154` plus the wording and bootstrap fix-ups that follow it, with
+  the cold-path deadline and the hand-observed cross-route agreement stated as risks in the gate.
+- [x] CI on `c01b0e1`: all seven jobs green, including the Stage 2 integration step of the
+  offline components job. Pull request [#6](https://github.com/aayushsaxena17/FloatChat/pull/6)
+  into `main` opened 2026-10-09; merge is the owner's decision.
+- [ ] Needs from Aayush: confirm ADR-0057, ADR-0059 and the region definitions in ADR-0060.
+
+## Stage 1 - live and captured-replay acceptance passed on stage1-v4 (ADR-0054, ADR-0055), 2026-10-09
+
+`codex/stage-1-perf` merged into `codex/stage-1` (PR #4, `6c88a0a`). Gate report:
+[docs/stage1-gate.md](docs/stage1-gate.md).
+
+- [x] Session `302412131a7c99fb` on `499b821`: live run 270/270 complete in 23.1 min (5,814
+  profiles, 4,144,346 levels, 31 source exclusions, 64 receipts per role, 0 HTTP 429), captured
+  replay 270/270 with scientific and active-partition no-change in 13.5 min; memory evidence
+  passes (acquire 237 MiB, process 673 MiB anonymous peak, 0 OOM).
+- [x] Five live-only defects found and fixed with regression tests: `222f437`, `7bec2c0`,
+  `d0e6565`, `b426f62`, `499b821` (ADR-0054); CI green on each pushed head.
+- [x] Advisor review of ADR-0047..0053 with dispositions for audit cadence, governor counters and
+  memory at the chunk cap (ADR-0055).
+- [x] v3 and v4 live runs agree byte for byte on all 5,792 shared profiles; full level audit of the
+  acceptance population passed.
+- [ ] Follow-ups listed under "Known limitations" in the gate report.
+- [ ] Stage 2 per [docs/stage2-plan.md](docs/stage2-plan.md).
+
+## Stage 1 - stage1-v4 execution rewrite implemented offline (ADR-0047..0053), 2026-10-08
+
+Branch `codex/stage-1-perf` from `e1ba4f0`. Scientific rules are unchanged (ADR-0053,
+`tests/stage1/test_byte_identity.py`); execution model, verification, catalogue model and sources
+changed under owner decisions recorded in `docs/stage1-v4-execution-design.md` (ADR-0039 authority).
+Advisor agreement for these ADRs is not recorded here.
+
+- [x] Live acceptance session 7153be6379df84de (stage1-v3 code) finished: 269 leaves complete, 1
+  quarantined, CLI exit 5, no captured replay run. The cause of the quarantine is to be read from the
+  preserved database; the session's evidence files and the cause analysis live in the live checkout,
+  not on this branch.
+- [x] Phase A review, analysis only ([review](docs/ingestion-performance-review.md), commit
+  `90e1e67`): the Jan-Mar backfill is upstream-bound (serial model 3.14-4.47 h: HTTP selection
+  1.12-2.45 h, metadata 0.55 h, worker CPU 1.14 h, COPY and commit 0.33 h,
+  [model](reports/stage1-perf-run-model.json)); the worker repeated the same work 4-5 times per
+  chunk (1,425 µs per level); one synthetic 87 x 699 commit took 16.5 s into an empty partition and 34.0 s
+  into a populated one, unexplained ([probe](reports/stage1-perf-db-probe.json)); "under 1 hour"
+  was judged not reliably reachable through Argovis with one request in flight.
+- [x] Owner decisions and the package brief: [execution design](docs/stage1-v4-execution-design.md);
+  per-package reports in `docs/v4-packages/` (A-J); ADR numbers, clauses changed and unsourced items
+  in [I.md](docs/v4-packages/I.md).
+- [x] A, decode/sanitize/encode (ADR-0053): 126,000 tokens, 20,970 levels,
+  [bench](reports/stage1-v4-bench-A.json): encode 0.797 s to 0.251 s, `documents()` 0.392 s to
+  0.070 s, `sanitize_raw` 0.659 s to 0.175 s, output identical to the pre-v4 code.
+- [x] B, fast mapper (ADR-0053), [bench](reports/stage1-v4-bench-B.json): map plus encode stage
+  8.661 s to 5.368 s with the old encoder (1.61x); 9.963 s to 4.617 s in the whole-chunk benchmark
+  with package A's encoder.
+- [x] C, write-once Parquet, Arrow-equality verification, checksum-verified upload (ADR-0050),
+  [bench](reports/stage1-v4-bench-C.json): `write_snapshot` 25.6 s to a best of three of 2.75 s (a
+  loaded host gave 1.7-14.7 s), `publish_verified` 12.0 s to 0.013 s.
+- [x] D, PostgreSQL work queue, acquire and process pools, `schedule` command, migration 0012
+  (ADR-0047): Celery, Beat and Redis removed from the workers; 160 offline tests passed; no
+  benchmark.
+- [x] E, thread-safe transport, adaptive governor, float-metadata cache (ADR-0048, ADR-0049),
+  [bench](reports/stage1-v4-bench-E.json) with a fake transport (12 chunks, 16 floats): HTTP attempts
+  96 to 52, `validate_raw` calls 384 to 52; no real upstream measurement.
+- [x] F, publication parts, slim staging, binary level COPY, compaction, migration 0013 (ADR-0051):
+  staged bytes 143,764,696 to 83,222,450 and `spool.prepare` 4.852 s to 0.006 s
+  ([baseline](reports/stage1-v3-bench-chunk-baseline.json), [v4](reports/stage1-v4-bench-chunk.json));
+  the commit on the new path is unmeasured.
+- [x] G, GDAC NetCDF source, `gdac-core-v1`, migration 0014, fixtures (ADR-0052): 105 offline tests;
+  observed download rates 5-47 KB/s from this host; not wired into the processor, CLI or publication
+  SQL.
+- [x] H, acceptance Compose with `acquire` and `process` services, memory sampler per service (ADR-0047):
+  95 offline tests; no Docker run.
+- [x] J, whole-chunk benchmark (87 x 699, synthetic, CPU only): `sum_measured_wall_s` 58.225 s to
+  9.57 s after packages A-F and 4.75 s after decode-once (commit 65eb3fc); RSS 683.0 to 524 MiB
+  ([bench](reports/stage1-v4-bench-chunk.json), [v3 baseline](reports/stage1-v3-bench-chunk-baseline.json)).
+- [x] Database on the new path ([probe](reports/stage1-v4-perf-db-probe.json)): 87 x 699 staging
+  COPY 3.8 s plus commit 3.2 s (was 4.0 s plus 16.5-34 s); pooled COPY+commit 107 µs per level (was
+  408); successor-chunk slot reads in milliseconds (was 20 s). The run model on v4 inputs
+  ([model](reports/stage1-v4-run-model.json)) projects worker CPU 126 µs per level (0.10 h for
+  Jan-Mar, was 1.14 h), database 0.09 h (was 0.33 h), captured replay 0.19 h (was 1.47 h); its HTTP
+  rows are still the serial one-request measurements, so the live wall time with four slots and
+  decoupled pools is not projected and must be measured.
+- [x] Integration suite on the integrated head: migrations 0012-0014 apply; `tests/stage1 -m
+  integration` 114 passed, 0 failed, plus the combined processor/MinIO case (passed, 61 s) and the
+  1 GiB writer proof; MinIO checksum behaviour confirmed by `minio_probe`
+  ([INTEGRATION-1](docs/v4-packages/INTEGRATION-1.md)). Offline: `pytest tests -m "not integration"`
+  1,295 passed; the four `test_security` cases need `gitleaks`, absent on this host. `ruff check`,
+  `ruff format --check` and strict `mypy` are clean repository-wide.
+- [ ] Benchmarks still missing: concurrent Argovis requests (no measurement of the governor) and the
+  cache's real hit ratio; both need a live run.
+- [ ] Live re-run of the Jan-Mar acceptance and its replay on the new topology: not scheduled; it
+  needs the owner's agreement, and the acceptance Compose topology and memory sampler have not run
+  under Docker.
+- [ ] Redis is still required by the Stage 0 API (`redis_url`, readiness check) and stays in the dev
+  stack; only the Stage 1 workers dropped it.
+- [x] GDAC wired end to end ([G2](docs/v4-packages/G2.md)): `ingest --source gdac` with
+  `prepare_cache`, source-aware admission and policy versions, `GdacSource` in `process_ticket`,
+  `gdac_map_profile` routing, migration 0015 (`app.run_source`, `app.profile_slot`, source-aware
+  `admit_run`/`ensure_slot`/`commit_publication`); offline fixture run publishes gdac profiles;
+  `test_gdac_sql.py` 6 integration cases pass. Not done: skipping the synthetic metadata landings,
+  gdac replay, Parquet schema metadata still names `argovis-core-v1`.
+- [ ] Not implemented: the audit cadence (`audit=True`, `app.audit_levels`), persisted governor
+  counters, and a decision on memory at the contractual chunk cap.
+- [x] ADR-0046 (`missing_basin` informational warning, codex/stage-1 50dbdbc) merged into this
+  branch; the v4 ADRs are ADR-0047..0053.
+
+## Stage 1 - stage1-v3 implemented (ADR-0040..0042), 2026-10-08
+
+- [x] Original session terminalized with the reviewed command: exit 3,
+  `terminalized_incomplete`, closed/partial, 120 complete/1,132 failed/8 quarantined,
+  science unchanged at 819 profiles/572,347 levels/67 partitions
+  ([frozen evidence](reports/stage1-original-terminalization.json)).
+- [x] Live empty-selection probe: both re-requested historical 404 selections return
+  404 `application/json` `[\n\n]\n` for all three roles; a control tile returns 200
+  ([probe](reports/stage1-live-empty-semantics.json)).
+- [x] Inventory-only census of all 1,260 weekly Jan-Mar 2025 leaves: 922 with documents,
+  338 empty (all the same 404 body), zero failures, 5,845 unique owned profiles, densest
+  month/tile slot 87 ([census](reports/stage1-inventory-census.json)). Depth spot-check
+  outside January: 384 levels/profile; one full-month request on the densest slot:
+  200, 87 profiles, 2.66 MB.
+- [x] Measured canonical content 1,214 B/level; weekly slices republish month slots
+  (~13 conversions/profile). ADR-0041 adopts monthly plan v2 and a 40 GiB run cap.
+- [x] ADR-0040 activates S1-SOURCE-2 (empty-delivery receipt, `excluded_source_loss`);
+  ADR-0042 defines the worker memory criterion. Migration 0009, transport/landing/
+  processor/reporting changes, contract/PRD/build-prompt text updated.
+- [x] Offline suite 424 passed; previously failing DB/processor integration tests pass,
+  including 404-receipt, mixed-triple, exclusion and combined-warning scenarios.
+- [x] Full stage1 suite 445 passed/1 opt-in skip; committed on `codex/stage-1` and
+  pushed for actual-head CI evidence (advisor-agreed push, not a gate decision).
+- [x] First CI run: secrets, web and docker passed. Three wrapper tests assumed the WSL
+  path, the writer memory probe used an 896 MiB container (OOM on the hosted runner;
+  locally 929 MiB RSS at the edge) and Stage 0 integration failed because a fresh dev
+  database lacked `floatchat_app` before migrating. All three fixed; local
+  `make integration` passes. The probe now uses the contract's 1 GiB (ADR-0042).
+- [x] First stage1-v3 live run (session c9af101ab1d458b9) interrupted after 14 minutes
+  as a measurement: S1-SOURCE-2 receipts completed empty chunks, ~4.3 MB canonical per
+  profile, 319 MiB worker anonymous peak, but ~10.5 h projected and 20 s idle-read
+  transport failures. ADR-0043: 12 h run bound and 60 s idle read (migration 0010).
+- [x] Live runs 3-5 found and fixed: the quadratic per-level publication commit
+  (ADR-0044, 23.5 s -> 1.3 s per 10,000 levels), a >=15 minute upstream slow episode
+  outlasting the retry window (ADR-0045), and host sleep (keep-awake during runs).
+- [x] Fifth live run (7153be6379df84de): 269/270 leaves complete in 3.79 h, 5,792
+  profiles, 4,128,567 levels, 205 partitions, 64 empty receipts, 28 source exclusions,
+  20.4 GB canonical work, 3,009 HTTP attempts, 328 MiB worker anonymous peak, no OOM.
+  One chunk quarantined on `missing_basin`; ADR-0046 makes it informational.
+- [ ] Re-verify, fresh preparation, live acceptance and captured replay, CI on the
+  final head, gate report.
+
+## Stage 1 - owner authorization for completion (ADR-0039), 2026-10-07
+
+The owner authorized live Argovis access with the key in the git-ignored `.env.txt`,
+operation of the preserved session and pushing/gate decisions on advisor (Fable)
+agreement, and asked for Stage 1 completion followed by Stage 2. Baseline before any
+change: lint, type checks and `make test` pass (410 Python passed, 45 integration
+deselected; 3 web). Planned order: terminalize the preserved run with the reviewed
+command; bounded live validation of empty-selection/404 behaviour; canonical-work
+amplification analysis and an inventory-only regional census; source-policy and
+capacity ADRs from measured evidence; fresh isolated acceptance and captured replay;
+commits, push and actual-head CI; gate report; then Stage 2. The current NO-GO stands
+until that evidence exists.
+
+## Stage 1 - consolidated offline blocker review; original run remains stopped
+
+The [single authoritative matrix](reports/stage1-blocker-review.json) and
+[review package](reports/stage1-blocker-review.md) distinguish implemented components,
+source/policy decisions and missing regional evidence. Current NO-GO supersedes every
+historical preparation GO. The 44 failures, eight quarantines, original deadlines,
+scientific state and budget remain untouched; no original service is operated.
+
+ADR-0036/S1-SOURCE-2 proposes exact inactive wording for a qualified Argovis-delivered
+population. Strict A stays active. Optional empty-delivery receipts and explicit
+whole-profile source-loss exclusions each need separate review, deployment evidence
+and bounded authorization. Offline proposal tests cannot close missing source science.
+F01-2 remains unchanged, with authentic descending/present-core-null limitations
+visible and repeated-pressure/error evidence retaining its synthetic/model scope.
+
+ADR-0037 optimizes bounded canonical encoding and publication certification while
+charging every actual conversion. The [regional-plan model](reports/stage1-regional-capacity-model.json)
+measures one 10 GiB run under a 1 GiB worker cgroup with all 1,260 roots, uneven
+retained growth, month-moving revisions, no-op deliveries and bounded recovery/rebuild.
+Results describe its labelled synthetic envelope, never the unknown regional population.
+Superseded and timed-out experiments are retained separately and are not passes.
+
+ADR-0038 provides a separately reviewable migration-0007 terminalizer with exact
+identity/deadline/manifests, closed-state retry and stop-only cleanup. Disposable
+connection-loss rehearsal retains protected records and one frozen partial result.
+The original procedure has not run. Its approval would close an incomplete record,
+not authorize another attempt. Fresh final-tree verification and source-pinned model
+evidence are linked by the consolidated generator; earlier reports below are historical.
+Actual-head CI, full isolated acceptance/replay and Stage 2 remain outstanding.
+
+The first final-tree verification failed: its shared SQL seed's ten-minute
+controller lease expired after a long independent processor probe, and a Beat
+teardown exceeded a five-second harness bound while the capacity model ran in
+parallel. Those artifacts remain archived as failures. Each independent SQL case
+now receives a fresh disposable seed lease; expiry assertions, production leases,
+work deadlines and budgets remain unchanged. The final heavy verification runs
+separately from the model, and only its actual results can support closure.
+
+## Stage 1 - offline resource diagnostics and source-policy review
+
+Following the owner/Astra NO-GO, the stopped acceptance project is not restarted
+or modified. The [offline remediation review](docs/stage1-offline-remediation.md)
+pins official API/translator sources and distinguishes source facts from unknown
+deployment behavior. The documented implementation starts at HTTP 404 and can
+drop empty-data documents before inventory projection. No body was persisted for
+the 44 historical pre-inventory failures; none becomes verified empty coverage.
+An offline witness using the pinned translator demonstrates discarded core or
+BGC inputs despite unique returned pressures. The warning quarantines remain.
+
+S1-DIAG-1/ADR-0034 adds bounded, sanitized number/profile/chunk/run diagnostics and
+frozen reporting, with portable migration 0008 tested only on disposable databases.
+Within a process, repeated spill restores verify SHA-256 and reuse an already
+certified canonical representation; every actual encoding remains charged and a
+new process certifies again. No run counter, cap or old deadline is reset.
+A five-slice growing-slot publication probe uses labelled 501-level authentic
+derivatives and real restricted PostgreSQL/MinIO. Its persisted measurements and
+explicit aggregate-exhaustion model are component evidence, not proof of complete
+Jan–Mar publication capacity or whole-pipeline memory.
+
+The [terminalization procedure](docs/stage1-terminalization-review.md) is a
+separate review-only proposal. A disposable synthetic-state rehearsal preserves
+completed science/catalogue/deadlines and freezes one partial report on repeat
+finalization, without ingestion. It does not authorize operating the original
+database. Fresh verification is recorded at its own source digest; older forensic
+and component evidence retains its stated scope. All three regional blockers,
+unfrozen original-run evidence and actual-head CI remain outstanding. The old live
+command remains withdrawn and Stage 2 remains blocked.
+
+## Stage 1 - coverage-failure investigation; live NO-GO
+
+Following Astra's NO-GO, fresh restricted-repository reads and checksum-verified
+sanitized MinIO landings account for every failed selection and quarantine in
+[the coverage review](reports/stage1-coverage-failure-review.md). All 44 HTTP 404s
+are inventory_before (23 January 1–8 tiles, 21 January 8–15 tiles), attempt 1;
+none establishes empty coverage. Four warned profiles carry degenerate_levels;
+the pinned translator discards degenerate input before returning merged science.
+Their unique returned pressures do not justify a warning waiver.
+
+The canonical-work ledger exactly balances 10,721,657,712 bytes against the
+10 GiB run limit. Only 15,760,528 bytes remain, below the 16 MiB reservation.
+All 18 candidates from the four limit chunks map offline below individual/chunk
+limits. The first failed in publication, the next three in validation without
+canonical reservations. Splitting cannot replenish a run-wide budget; no bound,
+accounting policy or quarantine treatment is changed. Scoped resource diagnostics
+and bounded publication-capacity evidence remain prerequisites for another attempt.
+
+Fresh forensic assertions, source checksums, warning witnesses, phase events and
+every failed time/tile selection are persisted separately from historical tests.
+Scientific and exact active-generation manifest hashes match before/after review:
+819 profiles, 572,347 levels, 67 active partitions. Only existing isolated DB/MinIO
+were briefly started for offline reads and stopped. No worker, supervisor, live
+call, credential/private-original access, original deadline reset, cancellation,
+finalization, new session or owner retry preparation occurred. The old command
+stays withdrawn. Original-run terminal/frozen evidence, 404 coverage resolution,
+warning safety and canonical capacity remain blockers; full acceptance and actual-head
+CI are outstanding. The gate now leads with current NO-GO and clearly labels
+historical component closure evidence. Stage 2 remains blocked.
+
+## Stage 1 - owner execution interrupted; acceptance incomplete
+
+The owner ran prepared session `6f3e7301f9789059` and interrupted the silent
+wrapper after approximately 80 minutes. Read-only persisted inspection found
+120 complete, 44 HTTP-404-failed and 8 quarantined leaves out of 1,260, with
+819 profiles/572,347 levels/67 active generations committed. The provisional
+[run report](reports/stage1-acceptance-live-interrupted.json) proves incomplete
+coverage. No replay or success result is claimed. The run remains open with its
+original six-hour deadline; stopping processes does not infer operator cancellation.
+
+Stop leftover project-labelled controller/client/service containers, retain data,
+and record [interruption evidence](reports/stage1-acceptance-interruption-evidence.json).
+Correct the wrapper to show safe persisted progress counters, reap an interrupted
+client, ignore repeated Ctrl+C during cleanup, stop one-off clients and services,
+record cleanup outcome and exit 130 without a traceback. Offline tests cover these
+paths and credential/output guards. No live worker is restarted, no credential or
+private original is inspected, and no source/retention/resource bound is relaxed.
+The prior prepared source seal remains unchanged; its retry command is withdrawn
+pending review of failed/quarantined coverage and the corrected wrapper. Full
+acceptance and actual-head CI remain outstanding; Stage 2 stays blocked.
+
+## Stage 1 - isolated acceptance preparation after Astra GO
+
+The owner supplied Astra's GO for preparation only on 2026-10-07. The isolated
+preparation proof and reviewable owner command are documented in
+[acceptance preparation](docs/stage1-acceptance-preparation.md) and persisted in
+[preparation evidence](reports/stage1-acceptance-preparation.json). Each session
+has a separate physical PostgreSQL database/server, MinIO bucket/server, Redis
+server/database/prefix, ingestion queue, internal network, Compose project and
+three persistent volumes, with no shared development volumes or exposed ports.
+An existing empty private control bucket verifies actual scoped IAM denial.
+The restricted-login database proof verifies migration 0007, the disposable
+acceptance marker and zero ingestion runs/profiles/measurement levels. A broker
+smoke task is acknowledged; disabled live admission is refused. All prepared
+services are stopped and their disposable data retained for review.
+
+Preparation uses only immutable cached local images, offline dependencies and
+live-disabled workers. No Argovis credential or private capture original is
+accessed; no upstream call, regional ingestion, scheduler, destructive retention,
+cloud resource, commit/push/PR or Stage 2 work occurs. Local disposable service
+credentials remain in ignored restricted files. A separately opted-in owner
+command transfers the upstream credential through stdin only, enforces a sealed
+source digest, and later requires complete regional live and captured replay
+evidence; preparing that command does not authorize running it.
+
+Fresh preparation checks are separate from the reviewed 372-test implementation
+snapshot: guard/orchestration tests, offline unit suite, lint/format/type checks,
+real isolated service initialization/proof and redacted secret scans. The earlier
+fault/memory/integration evidence remains historical at its stated component
+scope. Actual-head CI and full acceptance remain outstanding. F01-2's waived
+authentic descending/core-null limitations remain visible. Stage 2 stays blocked.
+
+## Stage 1 - contract accepted; implementation in progress
+
+The owner supplied Astra's GO for stage1-v2 and explicitly authorized Stage 1
+implementation. Work remains in `/home/floatchat/FloatChat-stage1`, baseline `619411a`,
+branch `codex/stage-1`. The preserved Windows checkout is untouched. Docker was resumed
+by the owner; integration verification uses fresh UUID-named containers without external
+network access, host ports, existing database volumes or production migrations.
+
+- [x] Owner-confirmed Astra contract GO, 86 unique acceptance requirements.
+- [x] Exact decimal/JSON rules, scientific/QC mapping, time/geometry/identity/revision policies.
+- [x] Additive portable PostgreSQL migrations with restricted ingestion procedures,
+  fencing, atomic level replacement/catalogue activation and late-conflict quarantine.
+- [x] Offline PostgreSQL constraint/publication/recovery and MinIO read-back tests.
+- [x] Internal catalogue coverage selection with retained/empty/source-absence distinctions.
+- [x] Bounded pinned-address HTTP adapter, durable request reservations and sanitized raw
+  landing; component checks include process-loss budgets and corrupt landing rejection.
+- [x] Durable controller/supervisor tick logic; worker and controller heartbeats are separate.
+- [x] Private disk spool and streamed Parquet writer; full retained snapshot membership
+  survives an eligible correction while the rolling cutoff advances.
+- [x] Truthfully attributed official published examples and labelled synthetic derivatives.
+- [x] Implement a separately opt-in, small raw fixture recorder with private originals,
+  matching inventory/profile/metadata, SHA-256, sanitization and secret-scan gating.
+- [x] Connect ticket-based worker execution, synchronous ingest CLI, independent supervisor
+  command and a UTC Beat class with a PostgreSQL singleton lock. Celery autoretry is off;
+  messages carry opaque IDs and workers require a <=1 GiB cgroup.
+- [x] Connect affected-slot streaming, transactional month partitions, canonical reservations,
+  persisted payload/profile/level accounting and full/eligible membership comparisons.
+- [x] Execute a combined restricted-login PostgreSQL/MinIO worker proof in network-isolated
+  disposable containers: publication, identical replay, retained empty refresh, shortened
+  level replacement, conflict quarantine and immutable reports after later revisions.
+- [x] Test the tiny capture recorder offline with synthetic responses: private originals,
+  credential sanitization, checksum/provenance and scan-before-copy rejection.
+- [x] Inspect only the owner's sanitized recorded bundle
+  `6a8ffa52f6db4954b974c449e68c54bc`; verify eight checksummed raw responses, matching
+  inventory/metadata, source revision components and 515 mapped levels from two profiles.
+  Persist actual representation coverage and F01 gaps; add offline authentic-fixture tests.
+- [x] Add real offline Redis/Celery prefork/supervisor fault evidence for worker/controller
+  loss, recovery, acknowledgement/redelivery, cancellation, deadlines, two-worker capacity,
+  manual/scheduled overlap and actual Beat singleton/lock-loss/replacement behavior.
+  Disposable lease acceleration is explicit; this is component evidence, not the full gate.
+- [x] Correct Beat startup lifecycle: the temporary lazy banner scheduler opens no database
+  or lock; only the running scheduler acquires it. Add regression coverage and rerun proofs.
+- [x] Implement spill-backed 100,000-row Parquet groups with Zstd level 3, bounded read-back
+  and a 100,001-level maximum-header memory probe under a 896 MiB cgroup, no swap/OOM,
+  measured RSS below 1 GiB. Persist writer options, typed pandas deep memory/index and ratio.
+- [x] Freeze full reporting metrics at finalization: provenance, availability, timings,
+  retry/quarantine reasons, coverage/gaps, generation IDs and scientific replacement deltas.
+  Reproduce JSON/Markdown after later revisions; unknown source counts remain unknown.
+- [x] Add credential-free numeric HTTP status/profile/request-role recorder diagnostics,
+  bounded optional 429 Retry-After and hostile offline redaction tests. Autoretry stays off.
+- [x] Audit successful owner bundle `10b19b21ac4d4d8ba69a4fc95e87de3c` with persisted
+  raw/inventory/metadata and hash assertions. `13857_068` supplies 103 D-mode pressure/
+  temperature levels with adjusted QC 2 and absent salinity. Expected R-mode is not observed;
+  no mode is relabelled and derived nulls are not treated as supplied source value nulls.
+- [x] Update complete authentic corpus coverage: two bundles, 12 responses, three profiles,
+  618 captured levels at that earlier point. Persist six gaps and 86-case fixture traceability.
+  Prior full-suite evidence is archived with its source/time, not claimed as rerun.
+- [x] Record the owner's safe `5903649_077D` diagnostic: HTTP 404 at `inventory_before`.
+  No complete fixture bundle or representation evidence resulted. Withdraw the documented
+  filename candidate and its retry command; do not infer a credential failure from 404.
+- [x] At the owner's request, prepare a separate one-request inventory-discovery script
+  for a fixed 5-degree Indian Ocean square and seven-day window. Offline synthetic tests
+  cover fixed documented parameters, 20-document and payload bounds, zero retries,
+  safe failure diagnostics and scan-before-copy. The owner-run command is in the gate
+  report; no agent live call occurs and discovery evidence cannot pass F01.
+- [x] Inspect only sanitized discovery `e5b3f14e549d49e69ed77fde03d40d8c`;
+  verify checksum/provenance and persist raw inventory-mode assertions for `6990616_100`
+  (core R) and `2904014_040` (core A), both ascending. These are candidate evidence,
+  not complete scientific captures; all six F01 gaps remain. Propose one bounded
+  owner-run capture for `6990616_100` based on its current inventory declaration.
+- [x] Audit successful sanitized capture `25f21e056e7c4db7bc1e21b0a28ea45f` and add
+  persisted authentic assertions: `6990616_100` proves 43 original pressure/temperature/
+  salinity levels in R-mode with QC 1. Matching inventory and metadata/checksums verify.
+  Exactly the core R-mode gap closes; adjusted/error/null/repeated-pressure representations
+  are absent. Corpus now has three bundles, 16 responses, four profiles and 661 levels.
+- [x] Record the owner's `2904014_040` capture rejection, `unknown_data_field`.
+  Its previously sanitized inventory contains `chla_fluorescence` and
+  `chla_fluorescence_qc`, outside the pinned 2.36.2 field contract. Add explicit inventory
+  compatibility flags and a labelled synthetic shape regression. Withdraw the candidate
+  and retry command; no failed private response is inspected and no scientific gap closes.
+- [x] Audit owner capture `9efe8f4e713c44a1a2964407e52b9a45`: matching inventory/profile/
+  metadata and supplemented provenance verify `2904014_040`, 501 A-mode adjusted core
+  values/QC (pressure QC 1; temperature/salinity QC 1/4). Exact fluorescence fields remain
+  non-core raw values/QC/attributes. This supersedes the earlier candidate withdrawal.
+  Its 1002 null cells belong only to nitrate and nitrate QC, not core measurements.
+  Four bundles now contain 20 responses, five distinct profiles and 1162 level occurrences.
+- [x] Apply the owner's F01-2/ADR-0033 amendment: retain authentic R/A/D and ascending;
+  waive further descending/core-null discovery while retaining both as unobserved authentic
+  coverage limitations. Add labelled admitted-fixture derivatives with exact basis checksums
+  and mutations. Fresh persisted test results, not waiver text, determine component closure.
+- [x] Verify labelled descending and R/A present-core-null parser/canonical/Parquet tests,
+  plus restricted PostgreSQL publication and A/D natural-key enforcement. Basis checksums,
+  attribution, source pins and exact mutations are persisted separately from authentic data.
+  Retain 21 focused unit and three focused database passes as component evidence.
+- [x] Independently rerun migration/HTTP/replay regressions: five selected database tests
+  passed. Production 429/503→200, terminal 401/403, four-503 exhaustion, finished timings,
+  counters and frozen reporting passed. Actual split predecessor replay used 466 nodes,
+  458 leaves, upstream/credential access denied, identical science and exact active IDs;
+  1375 recorded-origin attempts and 4582 audit rows are explained separately.
+- [x] Implement amended F01 fixture gate checks requiring remaining authentic evidence
+  AND fresh passed derivative/model/storage cases. All five authentic samples are ascending,
+  three D-mode, one R-mode and one A-mode, with QC 1/2/4. Under the owner's supplied Astra
+  F01-2 amendment, descending and source core-value null remain authentic coverage gaps
+  but require labelled derivative tests rather than further live recording.
+  Repeated pressure and supplied errors have separate labelled synthetic obligations;
+  their absence is not concealed as authentic coverage. Historical six/five-gap counts
+  above describe the earlier contract, not the current F01 minimum.
+  S1-G04 closure depends on fresh derivative/database/Parquet evidence and the remaining
+  authentic minimum. No agent live call or full acceptance preparation is authorized here.
+  The owner keeps
+  `ARGOVIS_API_KEY` in a private WSL terminal; this agent has not inspected it.
+  The completed small captures are audited in the gate report. Published examples
+  and synthetic component inputs do not pass F01 or prove complete regional coverage.
+- [x] Adopt narrowly pinned source supplement and F01 evidence split in contract, PRD,
+  build prompts and ADR-0030–0032, preserving data=all and unknown-field rejection.
+- [x] Add portable migration 0007 for real HTTP-failure dispositions and durable validated
+  predecessor split-tree bindings; wire actual CLI replay to the cloned topology.
+- [x] Add exact-field/legacy-rejection/alignment/unknown-field recorder regressions and
+  labelled authentic-derived repeated-pressure and normalized-error Parquet tests.
+- [x] Verify production HTTP retry/status/report persistence and actual temporal/spatial
+  CLI replay in disposable PostgreSQL/MinIO: 466 nodes, 458 leaves, upstream denied,
+  unchanged science/active generations and increased persisted attempts/audits.
+- [x] Rebuild verification and gate generation from persisted check/JUnit/corpus evidence,
+  distinguishing historical proofs, authentic gaps and labelled synthetic obligations.
+  Current full-suite/migration/error-storage/broker/memory/scan outcomes are reported in
+  the generated verification and gate documents; no successful outcome is inferred
+  before its evidence exists. Ubuntu restart was owner-approved after WSL timeouts;
+  saved changes survived and Docker Ubuntu integration is restored.
+- [ ] Execute the full 86-case acceptance matrix and required CI on the actual PR head.
+- [ ] Separately authorize and run isolated Jan-Mar 2025 live acceptance/captured-input replay.
+- [ ] Astra reviews implemented evidence before Stage 2.
+
+Current check results are generated from logs and JUnit in
+[the partial verification report](reports/stage1-verification.md). Component test counts
+are not completed acceptance-case counts. No full Stage 1 implementation GO, actual
+agent-executed Argovis call, production migration, cloud resource, destructive retention or
+publication of this branch is claimed. The owner executed the bounded capture separately.
+The local changes remain uncommitted. The generated current gate determines readiness
+specifically for isolated acceptance preparation from fresh evidence. Stop for owner/Astra
+implementation review; full Stage 1 acceptance and Stage 2 remain outstanding. This turn
+does not prepare or execute historical acceptance.
+
+### Historical contract amendment record, before owner-confirmed GO
+
+Authorized scope remains CONTRACT HARDENING ONLY. Work uses the sanitized WSL2 checkout
+`/home/floatchat/FloatChat-stage1`, baseline `619411a`, branch `codex/stage-1`.
+The preserved Windows project is untouched and was not used, merged or published.
+
+Astra's stage1-v1 review remains NO-GO. It accepted most earlier corrections but identified
+five material lifecycle/numeric blockers. This revision supersedes that unapproved candidate.
+
+- [x] Read and map all five follow-up blockers while retaining the original review cross-check.
+- [x] Separate full retained stored-snapshot reconciliation from fixed-T run eligibility.
+- [x] Distinguish verified empty initial fetch, empty refresh over retained science and
+  accepted last-profile ownership correction, including selector/receipt outcomes.
+- [x] Define publishing -> quarantined after rollback, fenced evidence commit and
+  unpublished intent abandonment with preserved references.
+- [x] Define recovery ownership for every nonterminal phase; distinguish worker/controller
+  loss from cancellation/deadline fencing and retain already complete chunks.
+- [x] Define overlap_skip persistence/no-run semantics, manual exit 6 and unchanged watermark.
+- [x] Bound exact numeric tokens/exponents/canonical bytes; define binary64 rounding,
+  overflow/nonzero-underflow quarantine and exact quoted/bare nonfinite outcomes/hashes.
+- [x] Expand future acceptance plan to 86 cases, including split P09a/P09b/P09c,
+  T06/P11, C05-C11, D05-D06 and N01-N08.
+- [x] Align PRD/build prompts and append ADR-0025 through ADR-0029.
+- [ ] Astra accepts stage1-v2 after re-review.
+- [ ] Separate owner instruction authorizes Stage 1 implementation.
+- [ ] Implement and execute offline acceptance cases/required CI.
+- [ ] Separately opt in to isolated Jan-Mar 2025 WSL2 live acceptance and captured-input
+  replay using owner-provided Argovis credentials, then generate persisted evidence.
+- [ ] Astra reviews implemented results before Stage 2.
+
+Contract-review report: all five supplied blockers now have explicit outcomes, legal
+transitions and linked objective test assertions in [the contract](docs/stage1-contract.md).
+Retained old dates survive snapshot rebuilding; source absence cannot erase science.
+Late conflicts quarantine legally; process loss can recover but closing fences prevent
+late publication. Numeric handling cannot depend on parser defaults or unbounded expansion.
+The original temporal/isolation/scientific/publication/security/local-service decisions
+remain; Stage 2+ features, destructive retention and cloud provisioning remain deferred.
+
+Validation for this revision: 18 documentation consistency checks passed, including
+86 unique acceptance IDs, all five follow-up blockers, the original eight review
+sections/twelve test areas, legal late-quarantine transition, recovery for all five
+nonterminal phases, removal of the three conflicting v1 rules, authority/ADR/count
+alignment, unchanged Stage 2+ scope, table widths and Markdown delimiters.
+Seven local Markdown links resolved; git diff --check passed. Exactly the five
+requested Markdown files remain changed; baseline/branch are unchanged.
+Stage1-v1's earlier 65-case/14-check document validation was not an Astra approval and
+is not reported as validation of this revision. No production code, migration, scheduler,
+fixture, credential, cloud resource or live upstream data call is created here.
+No runtime acceptance or CI result is claimed. Stop for Astra contract re-review.
+
+---
+
+## Stage 0 - corrective branch verified locally; review gate remains
+
+Owner confirmed revocation.
+
+- [x] Inventory and verify preservation of tracked, untracked, ignored configuration and Git data outside Git and OneDrive; durable restricted copy retained.
+- [x] Sanitize prototype sources and notebooks before archiving; preserve original working inputs.
+- [x] Scan current files and all advertised branch/tag history separately, with fully redacted evidence.
+- [x] Test isolated rewrite and independent validation, preserve private commit mapping, and publish seven affected refs atomically with explicit leases.
+- [x] Verify fresh published clone, removed January dataset paths/blobs, and unchanged unrelated refs.
+- [x] Implement local uv/pnpm foundation, pinned toolchains, locked dependencies, safe configuration and persistent Compose services.
+- [x] Verify deterministic 128-row, 5,617-byte attributed fixture and mocked bounded refetch behavior.
+- [x] Verify WSL2 Ubuntu 24.04 Make setup, empty and repeat startup, lint/format, type checks, tests, image builds and acceptance matrix.
+- [x] Merge foundation PR #1 only after all six required checks execute successfully.
+- [x] Verify fresh merged-main current/history scans and complete CI-equivalent suite on Ubuntu.
+- [x] Verify main CI and strict required GitHub Actions checks, two reviews, administrator enforcement and force-push/deletion prohibitions.
+- [x] Record final evidence and old-clone recovery in the Stage 0 gate report.
+
+At that Stage 0 gate, Stage 1 implementation had not started. No cloud infrastructure, production credentials, real LLM calls or required Argovis access were introduced.
+
+The preceding checklist records the original foundation execution. Astra subsequently identified
+four defects in readiness cancellation, metadata permissions, hook interpreter selection and
+refetch deadlines. The corrective branch starts cleanly from sanitized main 7e642a1.
+All four now have regression coverage and local full-suite verification; see
+reports/stage0-review-verification.json. Required CI must pass on the actual PR head.
+Do not merge until Astra reports no remaining P1 or P2 findings. No review approval is inferred
+from local tests, and no published history is rewritten by this correction.
+
+See [the complete gate report](docs/stage0-gate.md). The tested foundation commit is `608e4356b312f4422ad40996e1604fb1ef28a640`; verified merged main is `dc3d409c5fc9605c48ec0e7f8ca230d6c5e719b2`. A documentation-only follow-up records the post-merge evidence without changing tested runtime source.
+
+## Web redesign - light ocean theme and the float hero (branch `design/ocean-light`)
+
+Owner's brief (2026-10-14): the dark observatory design read as generic; redesign on a light
+palette, a real three.js float on the ocean, components sourced from 21st.dev, no lag.
+
+- [x] ADR-0076 and `docs/web-design.md` (replaces the observatory design note).
+- [x] Light token set in `style.css`; `ocean.css` removed; chart and map palettes re-stepped and
+      validated for light surfaces; Figtree and Source Serif 4 self-hosted.
+- [x] Eyebrows, kickers, captions, taglines, Soon badges and the SVG illustration removed; data
+      caveats kept as secondary text.
+- [x] Three.js hero in an async chunk with the performance budget of ADR-0076 §5; reduced
+      motion and no-WebGL paths.
+- [x] 21st.dev: four crawls (236 pages) and a reviewer pass; licensed patterns taken for the
+      KPI grid, stat semantics and footer; no licensed water shader exists there, so the scene
+      is original; the shader gallery is skipped (no source, no licence; the `paper-*` presets'
+      package is Apache-2.0, pending the owner's view).
+- [x] Verified: 76 Vitest tests, TypeScript, ESLint, Prettier, production build (`oceanScene`
+      chunk separate, no three.js in the entry), all four Playwright scenarios against the dev
+      stack (the chat scenario on the offline provider), screenshots at 1440 px and 390 px with
+      and without reduced motion, no horizontal overflow.
+- [x] Advisor reviewed the approach before the build and the result before this note; the
+      remaining advice (opaque top bar instead of a blurred one, headline measure) is applied.
+- [x] Entrance (owner's request, 2026-10-14): headline rises out of the water word by word,
+      the float surfaces from below, a faint satellite with a pulsed uplink from the antenna;
+      none of it under reduced motion. Verified with deterministic frames (fake clock and
+      seeked CSS animations) at four instants on desktop and phone.
+- [x] Cross-section hero after the owner's reference (2026-10-15): underwater half through a
+      wave-topped water wall, yellow hull with a collar, low-poly clouds, bubbles, copy in white
+      over the deep half; the camera pitch keeps the copy below the waterline on desktop and
+      phone (checked numerically). ADR-0076 carries a dated amendment.
+- [x] Realism pass (owner, 2026-10-15): the float is a GLB authored in the repo
+      (`scripts/build-float-model.mjs`) with PBR materials, environment lighting and shadows;
+      procedural sky and clouds in a shader; a small distant satellite; the hero fills the
+      viewport and the camera pitch follows the copy block; smooth scrolling for the
+      "View observations" link.
+- [x] Owner's check at 100% and 67% zoom (2026-10-15): the camera now keeps the low pitch that
+      shows the whole float on every screen, and the copy is drawn in two layers clipped at
+      the live waterline, navy above the water and white below, so it may cross the line.
+- [ ] Owner: review the branch in the browser; decide on pushing and the pull request; decide
+      whether Apache-2.0 packages count as licence-equivalent for future 21st.dev picks.
+
+## Stage 5 - historical jobs and exports (branch `codex/stage-5`)
+
+Owner instruction (2026-10-15): complete Stages 5 and 6 on separate branches and decide every
+open question without asking. Plan [docs/stage5-plan.md](docs/stage5-plan.md), ADR-0077 to
+ADR-0081.
+
+- [x] Plan and ADRs written before code; the advisor reviewed the approach (2026-10-16:
+      host memory, worker start-up without an environment, the scope watermark, DuckDB
+      `COPY` under locked settings, the three logins, sequencing); all points applied.
+- [x] Migration 0019: historical run mode, job, chunk, event and artefact tables (probed on an
+      empty database with every migration and on a copy of the dev database).
+- [x] Historical runs: policy, tile-restricted plans, admission, CLI `--mode historical --tiles`.
+- [x] Jobs core: model, store (PostgreSQL and memory), planner, export writer, artefact tokens,
+      runner; the jobs worker and the reconciler.
+- [x] API: exports, jobs, events (SSE with ids and resume), cancel, signed download; OpenAPI
+      0.4.0 and the web types.
+- [x] Web: jobs list and detail, dashboard export action, chat job offer.
+- [x] Dev stack: ingestion pool and jobs services, bootstrap login and environment adoption,
+      worker volumes owned by the service user; a first export over the dev dataset verified
+      end to end (download checksum and profile count agree with the query engine).
+- [x] Tests: runner over doubles (resume without repeats, upstream down, cancel), export writer,
+      jobs API, reconciler (object without a row), pipeline offer; integration scenario and the
+      Playwright jobs spec; README section.
+- [x] Found and fixed during the live runs (recorded in the gate): the supervisor and the
+      ingestion adapter reconnect after a lost session, fetch chunks retry (at most three runs,
+      re-planned from the catalogue), admission accepts only the run its request created and
+      a chunk is complete only when the catalogue covers it, jobs yield the ingestion scope
+      between runs (three replicas), DuckDB spills under the worker's own directory,
+      quarantined month-tiles are reported instead of re-fetched and run finalisation has
+      its own budget (ADR-0086).
+- [x] Advisor review of the run phase (2026-10-16 11:20 UTC): keep the owner informed of the
+      remaining chain, let the second identical request re-plan the 2015 gap instead of editing
+      job rows, split the spill fix per branch, rebuild the forecast snapshots once after the
+      last fetch and evaluate on an idle host, retry the push in the background, wake on
+      state transitions only; all applied.
+- [x] The ten-year Arabian Sea request three times through the job system (the third for the
+      pure-reuse measurement); `reports/historical_jobs_2026-10-16.md`.
+- [x] Gate report `docs/stage5-gate.md`.
+- [ ] Pull request (draft #18 open; final push pending the credential channel).
+
+## Stage 6 - forecasting (branch `codex/stage-6`, from `codex/stage-5`)
+
+Plan [docs/stage6-plan.md](docs/stage6-plan.md), ADR-0082 to ADR-0085.
+
+- [x] Plan and ADRs written before code; the advisor's points (measure fits before the full
+      grid, uncovered months, `--rebuild` through the API, interval traces, migration
+      companions) applied.
+- [x] Migration 0020: forecast definition, model and run tables.
+- [x] Series builder, snapshot and missing policy; seasonal naive, bounded SARIMA search,
+      rolling-origin backtests, selection, refusals; model artefacts.
+- [x] Forecast job in the jobs worker; API; workspace UI; tests; CI scenario; README.
+- [x] Eight snapshots rebuilt from the complete catalogue and committed; `make eval-forecast`
+      twice from a clean tree gives identical `reports/eval_forecast_2026-10-16.md` (three
+      published, two experimental, three refused); a diverged candidate found through the
+      report is now reported and never selected.
+- [x] Gate report `docs/stage6-gate.md`.
+- [ ] Pull request (draft #19 open; final push pending the credential channel).

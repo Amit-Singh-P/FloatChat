@@ -1,0 +1,247 @@
+"""Migration and local role initialization; never erase existing data."""
+
+import os
+import subprocess
+import sys
+
+import psycopg
+from psycopg import sql
+
+STAGE1_TABLES = frozenset(
+    {
+        "ingestion_environment",
+        "ingestion_run",
+        "ingestion_chunk",
+        "ingestion_attempt",
+        "raw_manifest",
+        "argo_float",
+        "argo_profile",
+        "core_measurement",
+        "logical_partition_slot",
+        "publication_intent",
+        "dataset_partition",
+        "coverage_receipt",
+        "ingestion_event",
+        "profile_outcome",
+        "ingestion_scope",
+        "scheduling_attempt",
+        "ingestion_staging",
+        "ingestion_input",
+        "canonical_work",
+        "run_baseline",
+        "run_final_evidence",
+        "chunk_accounting",
+        "processing_ticket",
+        "float_metadata_cache",
+        "replay_chunk_source",
+        "measurement_staging",
+        "landing_reset",
+        "ingestion_event_sequence_seq",
+        "profile_outcome_sequence_seq",
+    }
+)
+# Stage 2 read-only reference tables (ADR-0058): the query login reads them through the
+# migration's grants; the application role gets nothing, never blanket DML.
+STAGE2_READ_ONLY_TABLES = frozenset({"named_region"})
+# Stage 4 (ADR-0071, ADR-0072): the application login writes the semantic corpus, the
+# conversations and the LLM call ledger; the query login reads semantic_document only.
+STAGE4_APPLICATION_TABLES = frozenset(
+    {"semantic_document", "chat_conversation", "chat_message", "llm_call"}
+)
+# Stage 5 (ADR-0079): jobs, their chunks, progress events and export artefacts are written by
+# the API and the jobs worker on the application login.
+STAGE5_APPLICATION_TABLES = frozenset(
+    {"analysis_job", "analysis_job_chunk", "analysis_job_event", "analysis_artefact"}
+)
+# Stage 6 (ADR-0082): forecast definitions, model versions and runs.
+STAGE6_APPLICATION_TABLES = frozenset({"forecast_definition", "forecast_model", "forecast_run"})
+APPLICATION_TABLES = (
+    STAGE4_APPLICATION_TABLES | STAGE5_APPLICATION_TABLES | STAGE6_APPLICATION_TABLES
+)
+WITHHELD_TABLES = STAGE1_TABLES | STAGE2_READ_ONLY_TABLES
+
+
+def ensure_application_role(cursor: psycopg.Cursor[tuple[object, ...]]) -> None:
+    cursor.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", ("floatchat_app",))
+    if cursor.fetchone() is None:
+        cursor.execute("CREATE ROLE floatchat_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE")
+
+
+def ensure_query_role(
+    cursor: psycopg.Cursor[tuple[object, ...]], password: str | None = None
+) -> None:
+    """Stage 2 read-only login (ADR-0058). Migration 0016 may have created it NOLOGIN first,
+    so LOGIN and the password are set whenever a password is configured, never only on
+    creation. Without DB_QUERY_PASSWORD (Stage 1 tooling, restricted bootstraps) the role
+    exists but cannot log in."""
+    cursor.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", ("floatchat_query",))
+    if cursor.fetchone() is None:
+        cursor.execute("CREATE ROLE floatchat_query NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE")
+    if password is not None:
+        cursor.execute(
+            sql.SQL(
+                "ALTER ROLE floatchat_query LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT "
+                "PASSWORD {}"
+            ).format(sql.Literal(password))
+        )
+    cursor.execute("GRANT CONNECT ON DATABASE floatchat TO floatchat_query")
+
+
+def ensure_ingest_role(
+    cursor: psycopg.Cursor[tuple[object, ...]], password: str | None = None
+) -> None:
+    """Stage 5 (ADR-0078): the ingestion pool's login, a member of floatchat_ingestor (the
+    migrations' NOLOGIN worker role). Without DB_INGEST_PASSWORD no login exists."""
+    if password is None:
+        return
+    cursor.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", ("floatchat_ingest",))
+    if cursor.fetchone() is None:
+        cursor.execute(
+            "CREATE ROLE floatchat_ingest LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE "
+            "NOBYPASSRLS"
+        )
+    cursor.execute(
+        sql.SQL("ALTER ROLE floatchat_ingest LOGIN PASSWORD {}").format(sql.Literal(password))
+    )
+    cursor.execute("GRANT floatchat_ingestor TO floatchat_ingest")
+    cursor.execute("GRANT CONNECT ON DATABASE floatchat TO floatchat_ingest")
+    cursor.execute("GRANT SELECT ON public.alembic_version TO floatchat_ingestor")
+
+
+def adopt_environment(
+    cursor: psycopg.Cursor[tuple[object, ...]], bucket: str | None, project: str | None
+) -> bool:
+    """Stage 5 (ADR-0078): the one ingestion environment of this database belongs to the
+    stack that runs it. The imported acceptance row still named its session's bucket and
+    project while its parts live in this stack's bucket; the workers refuse a marker that
+    does not match their configuration, so the row is pointed at this stack. Nothing happens
+    without both values or with more than one environment."""
+    if not bucket or not project:
+        return False
+    cursor.execute("SELECT count(*) FROM app.ingestion_environment")
+    row = cursor.fetchone()
+    if row is None or int(row[0]) != 1:  # type: ignore[arg-type]
+        return False
+    cursor.execute(
+        "UPDATE app.ingestion_environment SET bucket = %s, queue_namespace = %s, "
+        "compose_project = %s WHERE bucket <> %s OR queue_namespace <> %s "
+        "OR compose_project <> %s",
+        (bucket, project + ".ingestion", project, bucket, project + ".ingestion", project),
+    )
+    return cursor.rowcount > 0
+
+
+def main() -> None:
+    # Stage 1 migrations revoke privileges from floatchat_app, so a fresh database
+    # needs the role before migrating, not only afterwards.
+    with psycopg.connect(os.environ["DATABASE_ADMIN_URL"], connect_timeout=3) as connection:
+        with connection.cursor() as cursor:
+            ensure_application_role(cursor)
+    subprocess.run(
+        ["alembic", "-c", "infra/alembic.ini", "upgrade", "head"],
+        check=True,
+        capture_output=True,
+        timeout=60,
+    )
+    with psycopg.connect(os.environ["DATABASE_ADMIN_URL"], connect_timeout=3) as connection:
+        with connection.cursor() as cursor:
+            ensure_application_role(cursor)
+            ensure_query_role(cursor, os.environ.get("DB_QUERY_PASSWORD"))
+            ensure_ingest_role(cursor, os.environ.get("DB_INGEST_PASSWORD"))
+            adopt_environment(
+                cursor,
+                os.environ.get("OBJECT_STORAGE_BUCKET"),
+                os.environ.get("COMPOSE_PROJECT_NAME"),
+            )
+            cursor.execute(
+                sql.SQL("ALTER ROLE floatchat_app PASSWORD {}").format(
+                    sql.Literal(os.environ["DB_APP_PASSWORD"])
+                )
+            )
+            cursor.execute("GRANT CONNECT ON DATABASE floatchat TO floatchat_app")
+            cursor.execute("GRANT USAGE ON SCHEMA public TO floatchat_app")
+            cursor.execute("CREATE SCHEMA IF NOT EXISTS app AUTHORIZATION floatchat_admin")
+            cursor.execute("GRANT USAGE ON SCHEMA app TO floatchat_app")
+            cursor.execute("SELECT to_regclass('app.committed_active_partitions')")
+            if cursor.fetchone()[0] is not None:
+                cursor.execute("GRANT SELECT ON app.committed_active_partitions TO floatchat_app")
+            # Remove the previous public-schema defaults and blanket write grants.
+            cursor.execute(
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE SELECT, INSERT, UPDATE, "
+                "DELETE ON TABLES FROM floatchat_app"
+            )
+            cursor.execute(
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE USAGE ON SEQUENCES "
+                "FROM floatchat_app"
+            )
+            cursor.execute(
+                "REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER "
+                "ON ALL TABLES IN SCHEMA public FROM floatchat_app"
+            )
+            cursor.execute("REVOKE ALL ON alembic_version FROM floatchat_app")
+            # Extension members can occur in schemas other than public too.
+            cursor.execute(
+                "SELECT n.nspname, c.relname FROM pg_class c "
+                "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "JOIN pg_depend d ON d.classid = 'pg_class'::regclass AND d.objid = c.oid "
+                "WHERE d.refclassid = 'pg_extension'::regclass AND d.deptype = 'e' "
+                "AND c.relkind IN ('r','p','v','m','f')"
+            )
+            for schema, table in cursor.fetchall():
+                cursor.execute(
+                    sql.SQL(
+                        "REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER "
+                        "ON TABLE {}.{} FROM floatchat_app"
+                    ).format(sql.Identifier(schema), sql.Identifier(table))
+                )
+                cursor.execute(
+                    sql.SQL("GRANT SELECT ON TABLE {}.{} TO floatchat_app").format(
+                        sql.Identifier(schema), sql.Identifier(table)
+                    )
+                )
+            # Application objects are owned by the migration role in the app schema.
+            # Never include extension members in existing-object grants.
+            cursor.execute(
+                "SELECT c.relname, c.relkind FROM pg_class c "
+                "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                "WHERE n.nspname = 'app' AND c.relowner = current_user::regrole "
+                "AND c.relkind IN ('r','p','S') AND NOT EXISTS "
+                "(SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass "
+                "AND d.objid = c.oid AND d.refclassid = 'pg_extension'::regclass "
+                "AND d.deptype = 'e')"
+            )
+            for name, kind in cursor.fetchall():
+                if name in WITHHELD_TABLES or name.startswith("core_measurement_"):
+                    cursor.execute(
+                        sql.SQL("REVOKE ALL ON {} app.{} FROM floatchat_app").format(
+                            sql.SQL("SEQUENCE" if kind == "S" else "TABLE"), sql.Identifier(name)
+                        )
+                    )
+                    continue
+                privileges = "USAGE" if kind == "S" else "SELECT, INSERT, UPDATE, DELETE"
+                object_type = "SEQUENCE" if kind == "S" else "TABLE"
+                cursor.execute(
+                    sql.SQL("GRANT {} ON {} app.{} TO floatchat_app").format(
+                        sql.SQL(privileges), sql.SQL(object_type), sql.Identifier(name)
+                    )
+                )
+            cursor.execute(
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA app REVOKE SELECT, INSERT, UPDATE, "
+                "DELETE ON TABLES FROM floatchat_app"
+            )
+            cursor.execute(
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA app REVOKE USAGE "
+                "ON SEQUENCES FROM floatchat_app"
+            )
+            cursor.execute("SELECT extname FROM pg_extension WHERE extname IN ('postgis','vector')")
+            if {row[0] for row in cursor.fetchall()} != {"postgis", "vector"}:
+                raise RuntimeError("required extensions unavailable")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+        print("Database initialization complete.")
+    except Exception:
+        print("Database initialization failed; no sensitive diagnostics emitted.", file=sys.stderr)
+        raise SystemExit(1) from None

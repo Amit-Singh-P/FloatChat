@@ -1,0 +1,222 @@
+name: ${COMPOSE_PROJECT_NAME:-floatchat-dev}
+
+x-app-environment: &app-environment
+  DATABASE_URL: ${DATABASE_URL:?Run scripts/dev.py dev to initialize local configuration}
+  REDIS_URL: ${REDIS_URL:?Local Redis URL required (API readiness check)}
+  OBJECT_STORAGE_ENDPOINT: ${OBJECT_STORAGE_ENDPOINT:?Local storage URL required}
+  OBJECT_STORAGE_ACCESS_KEY: ${OBJECT_STORAGE_ACCESS_KEY:?Local application key required}
+  OBJECT_STORAGE_SECRET_KEY: ${OBJECT_STORAGE_SECRET_KEY:?Local application credential required}
+  OBJECT_STORAGE_BUCKET: ${OBJECT_STORAGE_BUCKET:-floatchat-dev}
+  OBJECT_STORAGE_REGION: ${OBJECT_STORAGE_REGION:-us-east-1}
+
+# Stage 5 (ADR-0077, ADR-0078): the ingestion pool and the jobs worker share the ingestion
+# login; scripts/dev_worker.py resolves the environment id once the bootstrap has adopted the
+# stack's one environment row, so a fresh stack starts without a dataset.
+x-worker-environment: &worker-environment
+  INGESTION_DATABASE_URL: ${INGESTION_DATABASE_URL:?Local ingestion login URL required}
+  INGESTION_BUCKET: ${OBJECT_STORAGE_BUCKET:-floatchat-dev}
+  INGESTION_QUEUE_NAMESPACE: ${COMPOSE_PROJECT_NAME:-floatchat-dev}.ingestion
+  COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-floatchat-dev}
+  OBJECT_STORAGE_ENDPOINT: ${OBJECT_STORAGE_ENDPOINT:?Local storage URL required}
+  OBJECT_STORAGE_ACCESS_KEY: ${OBJECT_STORAGE_ACCESS_KEY:?Local application key required}
+  OBJECT_STORAGE_SECRET_KEY: ${OBJECT_STORAGE_SECRET_KEY:?Local application credential required}
+  INGESTION_APPLICATION_COMMIT: ${APPLICATION_COMMIT:-unknown}
+  FLOATCHAT_LIVE_INGESTION_ENABLED: "false"
+  PYTHONUNBUFFERED: "1"
+
+x-worker-depends: &worker-depends
+  db-init: { condition: service_completed_successfully }
+  storage-init: { condition: service_completed_successfully }
+
+services:
+  db:
+    build: { context: .., dockerfile: infra/docker/postgres.Dockerfile, target: runtime }
+    environment:
+      POSTGRES_USER: floatchat_admin
+      POSTGRES_PASSWORD: ${DB_ADMIN_PASSWORD:?Local admin credential required}
+      POSTGRES_DB: floatchat
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U floatchat_admin -d floatchat"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+  # Stage 0 API readiness dependency only; the ingestion work queue is PostgreSQL.
+  redis:
+    image: library/redis:7.4.2-alpine@sha256:02419de7eddf55aa5bcf49efb74e88fa8d931b4d77c07eff8a6b2144472b6952
+    command: [redis-server, --appendonly, "yes"]
+    volumes: [redis_data:/data]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  minio:
+    build: { context: .., dockerfile: infra/docker/minio.Dockerfile, target: runtime }
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Local admin user required}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Local admin credential required}
+      MINIO_BROWSER: "off"
+    volumes: [minio_data:/data]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/minio/health/ready', timeout=2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+  db-init:
+    build: { context: .., dockerfile: infra/docker/api.Dockerfile, target: runtime }
+    environment:
+      DATABASE_ADMIN_URL: ${DATABASE_ADMIN_URL:?Local migration role required}
+      DB_APP_PASSWORD: ${DB_APP_PASSWORD:?Local application credential required}
+      DB_QUERY_PASSWORD: ${DB_QUERY_PASSWORD:?Local query credential required}
+      # Stage 5 (ADR-0078): the ingestion login and the environment adoption values.
+      DB_INGEST_PASSWORD: ${DB_INGEST_PASSWORD:?Local ingestion credential required}
+      OBJECT_STORAGE_BUCKET: ${OBJECT_STORAGE_BUCKET:-floatchat-dev}
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-floatchat-dev}
+    command: [python, scripts/bootstrap_db.py]
+    depends_on:
+      db: { condition: service_healthy }
+    restart: "no"
+  storage-init:
+    build: { context: .., dockerfile: infra/docker/minio.Dockerfile, target: runtime }
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Local admin user required}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Local admin credential required}
+      OBJECT_STORAGE_ENDPOINT: ${OBJECT_STORAGE_ENDPOINT:?Local endpoint required}
+      OBJECT_STORAGE_ACCESS_KEY: ${OBJECT_STORAGE_ACCESS_KEY:?Local application key required}
+      OBJECT_STORAGE_SECRET_KEY: ${OBJECT_STORAGE_SECRET_KEY:?Local application credential required}
+      OBJECT_STORAGE_BUCKET: ${OBJECT_STORAGE_BUCKET:-floatchat-dev}
+    command: [python, /bootstrap_storage.py]
+    depends_on:
+      minio: { condition: service_healthy }
+    restart: "no"
+  api:
+    build: { context: .., dockerfile: infra/docker/api.Dockerfile, target: runtime }
+    environment:
+      <<: *app-environment
+      # Stage 2 read-only query login and the verified Parquet part cache (ADR-0058).
+      QUERY_DATABASE_URL: ${QUERY_DATABASE_URL:?Local query role URL required}
+      QUERY_OBJECT_CACHE_DIR: /var/lib/floatchat/query-cache
+      # Stage 3 (ADR-0064): provenance names the commit; scripts/dev.py sets it from Git.
+      APPLICATION_COMMIT: ${APPLICATION_COMMIT:-unknown}
+      # Stage 4 (ADR-0069): the assistant's provider and key; empty values leave the chat
+      # unavailable and the rest of the API untouched.
+      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
+      LLM_MODEL: ${LLM_MODEL:-gemini-3.8-flash}
+      LLM_FALLBACK_MODELS: ${LLM_FALLBACK_MODELS:-gemini-3.7-flash,gemini-3-flash-preview}
+      LLM_EMBEDDING_MODEL: ${LLM_EMBEDDING_MODEL:-gemini-embedding-001}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      LLM_SECOND_MODEL: ${LLM_SECOND_MODEL:-}
+      LLM_NARRATE_WITH_MODEL: ${LLM_NARRATE_WITH_MODEL:-true}
+      LLM_DAILY_USD_CAP: ${LLM_DAILY_USD_CAP:-1.0}
+      LLM_DAILY_TOKEN_CAP: ${LLM_DAILY_TOKEN_CAP:-2000000}
+      # Stage 5 (ADR-0079): export download tokens are signed with this local secret.
+      ARTEFACT_SIGNING_KEY: ${ARTEFACT_SIGNING_KEY:?Local signing key required}
+    volumes: [query_cache:/var/lib/floatchat/query-cache]
+    ports: ["127.0.0.1:${API_PORT:-8000}:8000"]
+    depends_on:
+      db-init: { condition: service_completed_successfully }
+      storage-init: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/v1/health/ready', timeout=5)"]
+      interval: 2s
+      timeout: 6s
+      retries: 30
+  # Stage 5: the Stage 1 ingestion pool (ADR-0047 topology) serving historical jobs. Only
+  # `acquire` ever sees the Argovis key; live ingestion stays opt-in through the restricted
+  # configuration file. Sizes are for the 3.7 GB development host.
+  acquire:
+    build: { context: .., dockerfile: infra/docker/api.Dockerfile, target: runtime }
+    mem_limit: 1g
+    environment:
+      <<: *worker-environment
+      INGESTION_ACQUIRE_SLOTS: ${INGESTION_ACQUIRE_SLOTS:-4}
+      FLOATCHAT_LIVE_INGESTION_ENABLED: ${FLOATCHAT_LIVE_INGESTION_ENABLED:-false}
+      ARGOVIS_API_KEY: ${ARGOVIS_API_KEY:-}
+    command: [python, scripts/dev_worker.py, acquire]
+    volumes: [worker_private:/home/floatchat/private]
+    depends_on: *worker-depends
+    restart: unless-stopped
+  process:
+    build: { context: .., dockerfile: infra/docker/api.Dockerfile, target: runtime }
+    mem_limit: ${INGESTION_PROCESS_MEMORY:-1500m}
+    environment:
+      <<: *worker-environment
+      INGESTION_PROCESS_WORKERS: ${INGESTION_PROCESS_WORKERS:-1}
+      INGESTION_WORKER_MEMORY_BYTES: "1073741824"
+    command: [python, scripts/dev_worker.py, process]
+    volumes: [worker_private:/home/floatchat/private]
+    depends_on: *worker-depends
+    restart: unless-stopped
+  supervisor:
+    build: { context: .., dockerfile: infra/docker/api.Dockerfile, target: runtime }
+    mem_limit: 256m
+    environment: *worker-environment
+    command: [python, scripts/dev_worker.py, supervise]
+    volumes: [worker_private:/home/floatchat/private]
+    depends_on: *worker-depends
+    restart: unless-stopped
+  # Stage 5 (ADR-0077, ADR-0080): the jobs worker claims export jobs, admits historical runs
+  # and writes the artefacts with DuckDB over its own part cache.
+  jobs:
+    build: { context: .., dockerfile: infra/docker/api.Dockerfile, target: runtime }
+    mem_limit: ${JOBS_MEMORY:-768m}
+    environment:
+      <<: [*app-environment, *worker-environment]
+      QUERY_DATABASE_URL: ${QUERY_DATABASE_URL:?Local query role URL required}
+      APPLICATION_COMMIT: ${APPLICATION_COMMIT:-unknown}
+      JOBS_QUEUES: ${JOBS_QUEUES:-export,forecast}
+      JOBS_CACHE_DIR: /var/lib/floatchat/jobs-cache
+      JOBS_EXPORT_DIR: /var/lib/floatchat/jobs-export
+    command: [python, scripts/dev_worker.py, jobs]
+    volumes:
+      - worker_private:/home/floatchat/private
+      - jobs_cache:/var/lib/floatchat/jobs-cache
+      - jobs_export:/var/lib/floatchat/jobs-export
+    depends_on: *worker-depends
+    restart: unless-stopped
+  # Stage 6 (ADR-0082): forecast jobs get their own worker process so they never queue behind
+  # hours of exports; same image and configuration, the forecast queue only.
+  forecasts:
+    build: { context: .., dockerfile: infra/docker/api.Dockerfile, target: runtime }
+    mem_limit: ${FORECASTS_MEMORY:-640m}
+    environment:
+      <<: [*app-environment, *worker-environment]
+      QUERY_DATABASE_URL: ${QUERY_DATABASE_URL:?Local query role URL required}
+      APPLICATION_COMMIT: ${APPLICATION_COMMIT:-unknown}
+      JOBS_QUEUES: forecast
+      JOBS_CACHE_DIR: /var/lib/floatchat/jobs-cache
+      JOBS_EXPORT_DIR: /var/lib/floatchat/jobs-export
+    command: [python, scripts/dev_worker.py, jobs]
+    volumes:
+      - worker_private:/home/floatchat/private
+      - forecasts_cache:/var/lib/floatchat/jobs-cache
+      - forecasts_export:/var/lib/floatchat/jobs-export
+    depends_on: *worker-depends
+    restart: unless-stopped
+  web:
+    build: { context: .., dockerfile: infra/docker/web.Dockerfile, target: development }
+    environment:
+      API_PROXY_TARGET: ${API_PROXY_TARGET:-http://api:8000}
+    ports: ["127.0.0.1:${WEB_PORT:-5173}:5173"]
+    depends_on:
+      api: { condition: service_healthy }
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:5173').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  query_cache:
+  worker_private:
+  jobs_cache:
+  jobs_export:
+  forecasts_cache:
+  forecasts_export:
